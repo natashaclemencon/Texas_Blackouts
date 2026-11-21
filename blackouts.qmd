@@ -1,0 +1,164 @@
+## Texas Blackouts
+
+```{r}
+library(terra)
+library(tmap)
+library(tidyverse)
+library(kableExtra)
+library(sf)
+library(stars)
+```
+
+
+```{r}
+# Read in the data.
+roads <- st_read("data/gis_osm_roads_free_1.gpkg.zip", query="SELECT * FROM gis_osm_roads_free_1 WHERE fclass='motorway'")
+buildings <- st_read("data/gis_osm_buildings_a_free_1.gpkg.zip", query="SELECT *
+FROM gis_osm_buildings_a_free_1
+WHERE (type IS NULL AND name IS NULL)
+OR type in ('residential', 'apartments', 'house', 'static_caravan', 'detached')")
+texas51 <- rast("data/VNP46A1/VNP46A1.A2021038.h08v05.001.2021039064328.tif")
+texas52 <- rast("data/VNP46A1/VNP46A1.A2021047.h08v05.001.2021048091106.tif")
+texas61 <- rast("data/VNP46A1/VNP46A1.A2021038.h08v06.001.2021039064329.tif")
+texas62 <- rast("data/VNP46A1/VNP46A1.A2021047.h08v06.001.2021048091105.tif")
+```
+
+
+```{r}
+# Check CRS's.
+# Both of the gpkgs are 4326
+st_crs(roads)
+st_crs(buildings)
+
+# Also 4326
+crs(texas51)
+```
+
+
+```{r}
+# Check CRS's with a warning message. 
+if(same.crs(texas51, roads)){
+  print("CRS's match")
+}else{(warning("CRS's do not match"))
+}
+```
+
+
+```{r}
+# Merge the rasters for the two days: 
+feb7 <- merge(texas51, texas61)
+feb16 <- merge(texas52, texas62)
+```
+
+```{r}
+# Find the difference in light before and after the storm by subtracting the two rasters.
+difference <- feb7 - feb16
+```
+
+```{r}
+# Reclassify into 0s and 1s. 
+rcl <- matrix(c(
+   -Inf,   200,  NA,
+   200,  Inf,  1
+), ncol = 3, byrow = TRUE)
+
+blackout <- as.factor(classify(difference, rcl = rcl))
+```
+
+```{r}
+# Convert raster data to polygon vector data
+blackout_poly <- as.polygons(blackout) |> 
+  st_as_sf() |> 
+  st_make_valid()
+```
+
+```{r}
+# Create a bounding box to crop the blackout_poly vector. 
+bbox <- st_bbox(c( xmin= -96.5, ymin=29, xmax=-94.5, ymax=30.5))
+```
+
+```{r}
+# Crop the vector with the bounding box. 
+cropped_blackout <- st_crop(blackout_poly, bbox)
+```
+
+```{r}
+# Reproject the cropped_blackout to the CRS EPSG 3083.
+cropped_blackout <- st_transform(cropped_blackout, crs= "EPSG:3083")
+# Check to make sure the reprojecting worked. 
+st_crs(cropped_blackout)
+```
+
+```{r}
+# Change roads CRS to match the new blackout CRS. 
+roads <- st_transform(roads, st_crs(cropped_blackout))
+
+
+# Create a buffer of 200 meters from the roads
+roadbuffer <- st_buffer(roads, dist = 200)
+# Union the buffered areas. 
+roadunion <- st_union(roadbuffer)
+
+
+
+#Subtract the buffered road areas from the cropped_blackout data. 
+blackoutnoroads <- st_difference(cropped_blackout,roadunion)
+
+```
+
+```{r}
+# Identify where buildings overlap with blackouts 
+# First, change the buildings CRS to match the cropped_blackout CRS. 
+buildings <- st_transform(buildings, st_crs(cropped_blackout))
+# Find where buildings overlap with blackouts
+buildingblackout <- st_intersection(blackoutnoroads, buildings)
+buildingpoints <- st_point_on_surface(buildingblackout)
+```
+
+```{r}
+# Plot it!
+tm_shape(buildingpoints)+
+    tm_dots(fill='blue',fill_alpha=0.1)+
+    tm_basemap("OpenStreetMap") +
+    tm_scalebar() +
+    tm_legend() +
+    tm_title("Houson Homes Without Power After Feb 2021 Storms")
+```
+
+```{r}
+# Count the number of rows in buildingpoints to see how many buildings are in the blackout. 
+nrow(buildingpoints)
+```
+
+## 157,409 homes lost power after the storms. 
+
+
+
+
+```{r}
+## Find the Houston light intensity before and after the storms. 
+
+# Crop feb7 to the Houston bounding box created earlier. 
+feb7cropped  <- crop(feb7, ext(bbox))
+
+# Plot the cropped feb7 raster.
+beforestorm <- tm_shape(feb7cropped)+
+    tm_raster(col.scale=tm_scale_continuous_log1p(values='viridis'),
+    col.legend = tm_legend(title = "Radiance (W·sr−1·m−2)"))+
+    tm_scalebar()+
+    tm_title("Houston Light Intensity Before Feb 2021 Storms")
+
+# Crop feb16 to the Houston bounding box created earlier. 
+feb16cropped <- crop(feb16, ext(bbox))
+
+afterstorm <- tm_shape(feb16cropped)+
+    tm_raster(col.scale=tm_scale_continuous_log1p(values='viridis'),
+    col.legend = tm_legend(title = "Radiance (W·sr−1·m−2)"))+
+    tm_scalebar()+
+    tm_title("Houston Light Intensity After Feb 2021 Storms")
+
+
+tmap_arrange(beforestorm, afterstorm, nrow=1)
+```
+
+## The results of these two maps show that there is a significant decrease in light radiance coming from Houston after the February 2021 storms. This study provides a helpful visual overview, but there are other important variables missing for a more in depth analysis. For example, a future analysis could examine which neighborhoods in particular were most impacted, and how blackouts might be correllated with areas of a lower socioeconomic status. 
